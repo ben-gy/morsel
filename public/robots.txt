@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://morsel.benrichardson.dev/sitemap.xml
