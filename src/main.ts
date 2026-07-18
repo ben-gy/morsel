@@ -23,6 +23,7 @@ import { startCountdown, type Countdown } from './countdown';
 import { summarize, tallyRound, emptyTally, renderSummary, shareText, type MatchTally } from './results';
 import { createLoop } from './engine/loop';
 import { createInput } from './engine/input';
+import { createJoystick } from './engine/joystick';
 import { createStore } from './engine/storage';
 import { createNet, type Net } from './engine/net';
 import { createRounds, type Rounds } from './engine/rematch';
@@ -31,11 +32,13 @@ import { hardenViewport } from './engine/mobile';
 import {
   createLobby,
   createRoomEntry,
+  mintCode,
   normalizeRoomCode,
   clearRoomInUrl,
   setRoomInUrl,
 } from './engine/lobby';
 import { newSeed } from './engine/rng';
+import { createNoticeboard, type Noticeboard, type PublicRoom } from './engine/noticeboard';
 
 hardenViewport();
 
@@ -66,6 +69,15 @@ let mode: Mode = modeOf(store.get('mode', DEFAULT_MODE.id));
 let liveMode: Mode = mode;
 let deepLinkUsed = false;
 
+// ── public drop-in ──────────────────────────────────────────────────────────
+/** True when the current room is a public one (open to anyone, drop-in). */
+let roomPublic = false;
+/** The public-room list, held only while browsing/hosting a public dish. */
+let board: Noticeboard | null = null;
+let publicRooms: PublicRoom[] = [];
+let matchTimer: ReturnType<typeof setTimeout> | null = null;
+let announceTimer: ReturnType<typeof setInterval> | null = null;
+
 const el = (html: string): HTMLElement => {
   const d = document.createElement('div');
   d.innerHTML = html.trim();
@@ -78,6 +90,8 @@ const FOOTER = `<footer class="site-footer">
 </footer>`;
 
 function shell(inner: string): void {
+  // Every screen shows the footer EXCEPT a live round (showGame re-adds `playing`).
+  document.body.classList.remove('playing');
   app.innerHTML = `<div class="main-content">${inner}</div>${FOOTER}`;
   const hub = app.querySelector<HTMLAnchorElement>('.hub-link');
   if (hub) hub.href = withName('https://hub.benrichardson.dev', myName);
@@ -93,6 +107,7 @@ function esc(s: string): string {
 
 function showMenu(): void {
   teardownRoom();
+  closeBoard();
   clearRoomInUrl();
 
   shell(`
@@ -109,7 +124,8 @@ function showMenu(): void {
       </div>
 
       <div class="menu-actions">
-        <button class="btn primary" id="play">Play</button>
+        <button class="btn primary" id="play">Play solo</button>
+        <button class="btn online" id="online">Play online</button>
         <button class="btn" id="friends">Play with friends</button>
       </div>
 
@@ -139,6 +155,10 @@ function showMenu(): void {
   app.querySelector('#play')!.addEventListener('click', () => {
     sfx.unlock();
     startSolo();
+  });
+  app.querySelector('#online')!.addEventListener('click', () => {
+    sfx.unlock();
+    showPublic();
   });
   app.querySelector('#friends')!.addEventListener('click', () => {
     sfx.unlock();
@@ -200,8 +220,8 @@ function showHelp(): void {
       <li><b>Big blobs are slow.</b> So the only way to catch anyone is to <b>DASH</b> — and a dash costs 15% of your mass, sprayed out behind you as food for whoever you are chasing.</li>
       <li><b>Whoever is biggest at the whistle wins.</b> Getting eaten just costs you a moment — you are never out.</li>
     </ul>
-    <p class="how-ctl"><b>Move:</b> aim with the mouse, or drag your thumb.
-    <b>Dash:</b> space, click, or the DASH button.</p>`,
+    <p class="how-ctl"><b>Move:</b> aim with the mouse, or push the on-screen stick with your thumb — rest it anywhere.
+    <b>Dash:</b> a quick tap, space, or the DASH button.</p>`,
   );
 }
 
@@ -221,6 +241,7 @@ function showAbout(): void {
 
 function showRoomEntry(): void {
   teardownRoom();
+  closeBoard();
   shell('<div class="screen" id="entry"></div>');
   createRoomEntry({
     container: app.querySelector<HTMLElement>('#entry')!,
@@ -230,13 +251,147 @@ function showRoomEntry(): void {
   });
 }
 
+// ── public drop-in ──────────────────────────────────────────────────────────
+// "Play online" drops you straight into a shared dish with whoever else is on
+// right now — no code to swap, bots filling any empty seats so it is fun even
+// when you are first in. It reuses the exact one-room-per-session flow below:
+// matchmaking picks (or mints) a public room, then enterRoom joins it ONCE. The
+// noticeboard (a separate room) advertises open dishes and carries the live
+// counts. Public play is opt-in and the IP cost is disclosed once, up front.
+
+const PUBLIC_MAX = MAX_PLAYERS;
+
+function openBoard(): void {
+  if (board) return;
+  board = createNoticeboard({
+    appId: 'morsel',
+    onRooms: (r) => {
+      publicRooms = r;
+      paintPublicCounts();
+    },
+  });
+}
+
+/** Leave the public list and stop advertising. */
+function closeBoard(): void {
+  if (matchTimer) {
+    clearTimeout(matchTimer);
+    matchTimer = null;
+  }
+  if (announceTimer) {
+    clearInterval(announceTimer);
+    announceTimer = null;
+  }
+  roomPublic = false;
+  const b = board;
+  board = null;
+  publicRooms = [];
+  void b?.destroy();
+}
+
+/** Total humans across every advertised public dish — honest social proof. */
+function publicOnline(): number {
+  return publicRooms.reduce((n, r) => n + r.players, 0);
+}
+
+function paintPublicCounts(): void {
+  const online = publicOnline();
+  const here = net ? net.count() + 1 : 0;
+  for (const elc of document.querySelectorAll<HTMLElement>('.pub-count')) {
+    elc.textContent =
+      roomPublic && net
+        ? `${here} in this dish · ${Math.max(online, here)} playing online`
+        : online > 0
+          ? `${online} playing online right now — join in`
+          : 'Be the first in — bots keep the dish busy until others arrive';
+  }
+}
+
+function showPublic(): void {
+  teardownRoom();
+  closeBoard();
+  if (!store.get('seen-public', false)) return showPublicIntro();
+  startMatchmaking();
+}
+
+/** The one-time WebRTC/IP disclosure, shown before a first public game. */
+function showPublicIntro(): void {
+  shell(`
+    <div class="screen public-intro">
+      <h2 class="pi-title">Play online</h2>
+      <p>Drop straight into a shared dish with anyone else online right now — no sign-up, no waiting. Empty seats fill with bots, so it is fun even if you are first in.</p>
+      <p class="fine"><b>One thing to know:</b> online play is peer-to-peer — your browser connects <i>directly</i> to the others in the dish, so they can see your IP address. That is true of any P2P game and there is no server here to hide behind. Want to keep it to people you invite? Use <b>Play with friends</b> instead.</p>
+      <div class="menu-actions">
+        <button class="btn primary" id="pi-go">I'm in — play online</button>
+        <button class="btn ghost" id="pi-back">Back</button>
+      </div>
+    </div>`);
+  app.querySelector('#pi-go')!.addEventListener('click', () => {
+    store.set('seen-public', true);
+    startMatchmaking();
+  });
+  app.querySelector('#pi-back')!.addEventListener('click', showMenu);
+}
+
+function startMatchmaking(): void {
+  teardownRoom();
+  roomPublic = true;
+  openBoard();
+  shell(`
+    <div class="screen matchmaking">
+      <h1 class="title">Morsel</h1>
+      <div class="mm-status"><span class="spinner" aria-hidden="true"></span> <span>Finding a dish…</span></div>
+      <p class="pub-count mm-count"></p>
+      <button class="btn ghost" id="mm-cancel">Back</button>
+    </div>`);
+  app.querySelector('#mm-cancel')!.addEventListener('click', showMenu);
+  paintPublicCounts();
+  // Give the board a moment to hear the open dishes, then join the busiest one
+  // with a free seat — fill, don't spill — or host a fresh dish if there is none.
+  matchTimer = setTimeout(pickAndJoin, 1600);
+}
+
+function pickAndJoin(): void {
+  matchTimer = null;
+  const joinable = publicRooms
+    .filter((r) => r.players < r.max)
+    .sort((a, b) => b.players - a.players);
+  if (joinable.length) enterRoom(joinable[0].code, false, true);
+  else enterRoom(mintCode(), true, true);
+}
+
+/** Advertise this dish while we hold the host role; stop the moment we do not. */
+function startAnnouncing(): void {
+  if (announceTimer) clearInterval(announceTimer);
+  const tick = (): void => {
+    if (!net || !board) return;
+    if (net.isHost()) {
+      board.announce({
+        code: roomCode,
+        host: myName,
+        players: net.count() + 1,
+        max: PUBLIC_MAX,
+        playing: rounds?.state().phase === 'playing',
+      });
+    } else {
+      board.unannounce();
+    }
+    paintPublicCounts();
+  };
+  announceTimer = setInterval(tick, 2000);
+  tick();
+}
+
 /**
  * Join the room ONCE. Everything after this — the lobby, round 1, every
  * rematch — happens inside this Net. It is torn down only on the way back to
- * the menu.
+ * the menu. `isPublic` opens the dish to anyone (minPlayers 1 so it starts
+ * instantly with bots, auto-ready, and advertised on the public list).
  */
-function enterRoom(code: string, created: boolean): void {
+function enterRoom(code: string, created: boolean, isPublic = false): void {
   teardownRoom();
+  if (!isPublic) closeBoard();
+  roomPublic = isPublic;
   roomCode = code;
   setRoomInUrl(code);
 
@@ -257,7 +412,9 @@ function enterRoom(code: string, created: boolean): void {
   rounds = createRounds({
     net,
     playerName: myName,
-    minPlayers: 2,
+    // A public dish starts with one human (bots fill the rest); a private room
+    // still waits for a friend.
+    minPlayers: isPublic ? 1 : 2,
     // The host's mode travels FROZEN inside the round start. A setting each peer
     // reads from its own UI is a setting two peers can disagree about — and here
     // it would mean two players in differently-sized dishes on the same seed.
@@ -272,6 +429,13 @@ function enterRoom(code: string, created: boolean): void {
   });
 
   showLobby();
+
+  if (isPublic) {
+    // Auto-ready so the dish starts the instant the mesh settles (bots fill the
+    // seats), and advertise it so others drop in.
+    rounds.vote();
+    startAnnouncing();
+  }
 }
 
 function showLobby(): void {
@@ -283,10 +447,20 @@ function showLobby(): void {
     net,
     rounds,
     roomCode,
-    minPlayers: 2,
+    minPlayers: roomPublic ? 1 : 2,
     maxPlayers: MAX_PLAYERS,
     onCancel: showMenu,
   });
+
+  // A public dish shows the live head-count as social proof; a private room does
+  // not (it is just you and the friends you invited). Mount it OUTSIDE the lobby
+  // box — createLobby owns that container and rewrites it on every re-render,
+  // which would wipe an element appended inside.
+  if (roomPublic) {
+    const counts = el('<p class="pub-count lobby-count"></p>');
+    box.parentElement?.appendChild(counts);
+    paintPublicCounts();
+  }
 
   // The lobby view owns the roster; this strip shows what the HOST has picked,
   // which is the only mode that matters. Guests see the gossiped value — never
@@ -334,6 +508,7 @@ let cleanupLobby: (() => void) | null = null;
 
 function startSolo(): void {
   teardownRoom();
+  closeBoard();
   roundNo++;
   const seed = newSeed();
   startRound(seed, mode, [{ id: 'solo', name: myName }], true);
@@ -418,6 +593,7 @@ function showGame(g: Game, me: number, m: Mode): void {
         </div>
       </div>
     </div>`);
+  document.body.classList.add('playing'); // hide the footer while the round is live
 
   const canvas = app.querySelector<HTMLCanvasElement>('#cv')!;
   const renderer = createRenderer(canvas);
@@ -449,8 +625,35 @@ function showGame(g: Game, me: number, m: Mode): void {
     dashQueued = true;
   };
   dashBtn.addEventListener('pointerdown', fireDash);
+
+  // Steering. On a MOUSE the blob aims at the cursor (precise, no occlusion). On
+  // TOUCH that meant reaching across and covering the blob to point where you
+  // wanted to go — so touch now gets a FLOATING JOYSTICK: rest a thumb anywhere,
+  // push the way you want to swim. A quick tap (no real push) dashes.
+  let lastPointerType = 'mouse';
+  let joyStart = 0;
+  let joyMax = 0;
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const joystick = createJoystick({
+    surface: canvas,
+    reducedMotion,
+    onStart: () => {
+      joyStart = performance.now();
+      joyMax = 0;
+    },
+    onChange: (v) => {
+      if (v.mag > joyMax) joyMax = v.mag;
+    },
+    onEnd: () => {
+      if (performance.now() - joyStart < 250 && joyMax < 0.25) dashQueued = true;
+    },
+  });
   canvas.addEventListener('pointerdown', (e) => {
+    lastPointerType = e.pointerType;
     if (e.pointerType === 'mouse') dashQueued = true;
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    lastPointerType = e.pointerType;
   });
 
   app.querySelector('#pause')!.addEventListener('click', () => setPaused(true));
@@ -537,19 +740,27 @@ function showGame(g: Game, me: number, m: Mode): void {
       lastFrame = now;
 
       if (!paused && running) {
-        // Aim at the pointer. There is no "hold to move" — the blob always swims
-        // toward where you are pointing, which is the only control scheme that
-        // works identically for a mouse and a thumb.
-        const p = input.state.pointer;
         const self = g.blobs[me];
-        if (p && self) {
-          const w = renderer.toWorld(p.x, p.y);
-          const dx = w.x - self.x;
-          const dy = w.y - self.y;
-          // A dead zone inside the blob, or it jitters when you point at yourself.
-          const d = Math.hypot(dx, dy);
-          if (d > radiusOf(self.mass) * 0.35) session?.intent(dx, dy, false);
-          else session?.intent(0, 0, false);
+        if (joystick.active()) {
+          // Touch: swim the way the thumb is pushing. Inside the dead zone the
+          // vector is (0,0), which reads as drift — exactly what we want.
+          const v = joystick.vector();
+          session?.intent(v.x, v.y, false);
+        } else if (lastPointerType === 'mouse' && self) {
+          // Desktop: aim at the cursor, as before.
+          const p = input.state.pointer;
+          if (p) {
+            const w = renderer.toWorld(p.x, p.y);
+            const dx = w.x - self.x;
+            const dy = w.y - self.y;
+            // A dead zone inside the blob, or it jitters when you point at yourself.
+            const d = Math.hypot(dx, dy);
+            if (d > radiusOf(self.mass) * 0.35) session?.intent(dx, dy, false);
+            else session?.intent(0, 0, false);
+          }
+        } else {
+          // Touch with no thumb down → drift to a stop.
+          session?.intent(0, 0, false);
         }
         const wantDash = dashQueued || input.state.pressed.has('dash');
         if (wantDash) session?.intent(self ? self.ax : 0, self ? self.ay : 0, true);
@@ -577,6 +788,7 @@ function showGame(g: Game, me: number, m: Mode): void {
   cleanupGame = () => {
     loop.stop();
     input.destroy();
+    joystick.destroy();
     ro.disconnect();
     clearInterval(hudTimer);
     countdown?.cancel();
@@ -690,6 +902,14 @@ function showResults(): void {
   }
 
   rounds?.finish();
+  // A public dish never stops: auto-ready for the next round so play loops and
+  // anyone who joined mid-round gets into the next one. The results still show
+  // during the start countdown.
+  if (roomPublic) {
+    rounds?.vote();
+    again.setAttribute('disabled', '');
+    again.textContent = 'Next dish…';
+  }
   again.addEventListener('click', () => {
     rounds?.vote();
     again.setAttribute('disabled', '');
@@ -749,6 +969,11 @@ function teardownRoom(): void {
   cleanupLobby = null;
   countdown?.cancel();
   countdown = null;
+  if (announceTimer) {
+    clearInterval(announceTimer);
+    announceTimer = null;
+  }
+  roomPublic = false;
   session?.destroy();
   session = null;
   rounds?.destroy();
@@ -762,6 +987,9 @@ function teardownRoom(): void {
   game = null;
   roundNo = 0;
   tally = emptyTally();
+  // Note: the noticeboard (public list) has its OWN lifecycle — a public join
+  // tears down and re-enters the game room without dropping the board. It is
+  // closed explicitly by closeBoard() on the way to the menu / a private room.
 }
 
 window.addEventListener('beforeunload', () => {

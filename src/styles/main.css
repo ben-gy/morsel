@@ -72,6 +72,58 @@ body {
   text-decoration: underline;
 }
 
+/* Mid-round the "more games" backlink is noise and steals a strip of the dish on
+   a phone. main.ts adds `playing` to <body> for a live round and removes it on
+   every other screen. */
+body.playing .site-footer {
+  display: none !important;
+}
+
+/* ── public drop-in ────────────────────────────────────────────────────────── */
+/* "Play online" gets an accent so it reads as the social option next to solo. */
+.btn.online {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.btn.online:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.public-intro,
+.matchmaking {
+  gap: 16px;
+  text-align: center;
+  max-width: 30rem;
+}
+.pi-title {
+  font-size: 1.6rem;
+  margin: 0;
+}
+.public-intro p {
+  line-height: 1.5;
+}
+
+.mm-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-size: 1.05rem;
+  color: var(--fg);
+}
+
+/* Live head-count — the social proof that makes an empty dish feel worth joining. */
+.pub-count {
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 0.95rem;
+  min-height: 1.2em;
+  text-align: center;
+}
+.lobby-count {
+  margin-top: 8px;
+}
+
 /* ── buttons ─────────────────────────────────────────────────────────────── */
 
 .btn,
