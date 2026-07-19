@@ -16,6 +16,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 
 /** A Trystero stand-in: enough surface for net.ts, with hand-drivable channels. */
 const rooms: TestRoom[] = [];
@@ -60,7 +61,7 @@ vi.mock('trystero', () => ({
   },
 }));
 
-const { createNet, netStats, resetNetStats } = await import('../src/engine/net');
+const { createNet, netStats, resetNetStats } = await import('@ben-gy/game-engine/net');
 
 const APP = 'morsel-lifecycle';
 
@@ -179,18 +180,31 @@ describe('createNet — channel fan-out', () => {
     await net.leave();
   });
 
-  it('keeps the rematch protocol on exactly three reserved names', () => {
+  it('keeps the rematch protocol on exactly four reserved names', () => {
     // net.channel() fans out, so a game channel colliding with rematch.ts's
-    // 'rv'/'rs'/'rq' would feed every message to both subsystems.
+    // 'rv'/'rs'/'rq'/'rk' would feed every message to both subsystems.
     //
     // ADAPTED from windup, which types its own channel list as `Chan` imported
     // from src/match.ts so tsc breaks on a rename. Morsel's match layer does not
     // exist yet, so instead of inventing names we read the reserved set straight
-    // out of rematch.ts — if the engine ever grows a fourth channel, this goes
-    // red and whoever wires up match.ts has to pick a name around it.
-    const src = readFileSync('src/engine/rematch.ts', 'utf8');
+    // out of the engine's rematch.ts — if it ever grows a fifth channel, this
+    // goes red and whoever wires up match.ts has to pick a name around it.
+    //
+    // Engine v1.1.0 added 'rk': the host now chases an unacknowledged start
+    // rather than assuming it landed, which is what stops a peer whose data
+    // channel opened a beat late from watching the round begin without it.
+    // Resolved through the package's exports map rather than a hardcoded
+    // node_modules path, so this keeps working if the install layout changes.
+    const enginePath = createRequire(import.meta.url).resolve('@ben-gy/game-engine/rematch');
+    const src = readFileSync(enginePath, 'utf8');
     const reserved = [...src.matchAll(/net\.channel<[^>]*>\(\s*'([^']+)'/g)].map((m) => m[1]);
-    expect(reserved.sort()).toEqual(['rq', 'rs', 'rv']);
+    expect(reserved.sort()).toEqual(['rk', 'rq', 'rs', 'rv']);
     for (const c of reserved) expect(c.length).toBeLessThanOrEqual(12);
+    // Morsel's own channels must stay clear of every one of them.
+    const mine = [
+      ...readFileSync('src/net-game.ts', 'utf8').matchAll(/\.channel<[^>]*>\(\s*'([^']+)'/g),
+    ].map((m) => m[1]);
+    expect(mine.length).toBeGreaterThan(0);
+    for (const c of mine) expect(reserved).not.toContain(c);
   });
 });

@@ -22,7 +22,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createSession, type SessionSeat } from '../src/net-game';
 import { Game, type Seat } from '../src/game';
 import { MODES } from '../src/modes';
-import type { Net, PeerId } from '../src/engine/net';
+import type { Net, PeerId } from '@ben-gy/game-engine/net';
 
 /**
  * A Net that is connected to nothing. The session under test is the only peer
@@ -40,7 +40,23 @@ function silentNet(
     host: () => host,
     isHost: () => host === selfId,
     hostSettled: () => host !== null,
+    // A term only matters when two claimants argue; here there is no second
+    // peer to argue with. 0 = "never heard a host", 1 = this fixed one.
+    hostEpoch: () => (host === null ? 0 : 1),
     count: () => 1,
+    // The roster of one never changes, so a subscriber is never called. It still
+    // has to hand back a working unsubscribe: rematch.ts calls it on destroy.
+    onPeersChange: () => () => {},
+    takeover: () => {},
+    netDiag: () => ({
+      selfId,
+      host,
+      epoch: host === null ? 0 : 1,
+      settled: host !== null,
+      peers: [selfId],
+      relaySockets: {},
+      turn: false,
+    }),
     channel: <T>(name: string) => {
       const send = ((d: T) => {
         if (sent) (sent[name] ??= []).push(d);

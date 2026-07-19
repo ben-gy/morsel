@@ -13,7 +13,7 @@
 import { Game, type Seat } from '../../src/game';
 import type { Mode } from '../../src/modes';
 import { botIntent, personalities, BOT_HZ, type Personality } from '../../src/bot';
-import { makeRng } from '../../src/engine/rng';
+import { makeRng } from '@ben-gy/game-engine/rng';
 
 export interface RoundOpts {
   seed: number;
