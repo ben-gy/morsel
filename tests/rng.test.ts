@@ -14,7 +14,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { hashSeed, makeRng, pick, randInt, shuffle } from '../src/engine/rng';
+import { hashSeed, makeRng, pick, randInt, shuffle } from '@ben-gy/game-engine/rng';
 import { Game, type Pellet, type Seat } from '../src/game';
 import { MODES, MODE_LIST, type Mode } from '../src/modes';
 

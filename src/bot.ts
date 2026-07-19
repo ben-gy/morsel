@@ -18,7 +18,7 @@
 
 import { canEat, radiusOf, START_MASS, type Blob, type Game } from './game';
 import { TUNING as T } from './tuning';
-import { randFloat, type Rng } from './engine/rng';
+import { randFloat, type Rng } from '@ben-gy/game-engine/rng';
 
 /** How many times a second a bot re-decides. */
 export const BOT_HZ = 10;

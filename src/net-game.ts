@@ -39,8 +39,8 @@
 
 import { Game, canEat, radiusOf, type Pellet } from './game';
 import { botIntent, personalities, BOT_HZ, type Personality } from './bot';
-import { makeRng } from './engine/rng';
-import type { Net, PeerId } from './engine/net';
+import { makeRng } from '@ben-gy/game-engine/rng';
+import type { Net, PeerId } from '@ben-gy/game-engine/net';
 
 /** Host -> all: the shared world. */
 interface WorldMsg {

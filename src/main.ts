@@ -26,14 +26,15 @@ import { createFx, colorOf } from './fx';
 import { createSfx } from './sound';
 import { startCountdown, type Countdown } from './countdown';
 import { summarize, tallyRound, emptyTally, renderSummary, shareText, type MatchTally } from './results';
-import { createLoop } from './engine/loop';
-import { createInput } from './engine/input';
-import { createJoystick } from './engine/joystick';
-import { createStore } from './engine/storage';
-import { createNet, type Net } from './engine/net';
-import { createRounds, type Rounds } from './engine/rematch';
-import { resolveName, withName } from './engine/identity';
-import { hardenViewport } from './engine/mobile';
+import { createLoop } from '@ben-gy/game-engine/loop';
+import { createInput } from '@ben-gy/game-engine/input';
+import { createJoystick } from '@ben-gy/game-engine/joystick';
+import { createStore } from '@ben-gy/game-engine/storage';
+import { createNet, roomAppId, setTurnConfig, type Net } from '@ben-gy/game-engine/net';
+import { getTurnConfig } from '@ben-gy/game-engine/turn';
+import { createRounds, type Rounds } from '@ben-gy/game-engine/rematch';
+import { resolveName, withName } from '@ben-gy/game-engine/identity';
+import { hardenViewport } from '@ben-gy/game-engine/mobile';
 import {
   createLobby,
   createRoomEntry,
@@ -41,13 +42,24 @@ import {
   normalizeRoomCode,
   clearRoomInUrl,
   setRoomInUrl,
-} from './engine/lobby';
-import { newSeed } from './engine/rng';
-import { createNoticeboard, type Noticeboard, type PublicRoom } from './engine/noticeboard';
+} from '@ben-gy/game-engine/lobby';
+import { newSeed } from '@ben-gy/game-engine/rng';
+import { createNoticeboard, type Noticeboard, type PublicRoom } from '@ben-gy/game-engine/noticeboard';
 
 hardenViewport();
 
-const store = createStore('morsel');
+/**
+ * The repo slug. Every mesh this page opens — the game room AND the public
+ * noticeboard — is namespaced off it via `roomAppId()`, which folds in the
+ * engine's protocol revision so a player on a stale cached build lands in a
+ * different signaling namespace instead of half-connecting and desyncing.
+ */
+const SLUG = 'morsel';
+const APP_ID = roomAppId(SLUG);
+
+// The RAW slug, deliberately — local settings (name, mute) must survive a
+// protocol bump, so the storage namespace never carries the revision.
+const store = createStore(SLUG);
 const app = document.querySelector<HTMLDivElement>('#app')!;
 
 const BLOB_NAMES = [
@@ -269,7 +281,7 @@ const PUBLIC_MAX = MAX_PLAYERS;
 function openBoard(): void {
   if (board) return;
   board = createNoticeboard({
-    appId: 'morsel',
+    appId: APP_ID,
     onRooms: (r) => {
       publicRooms = r;
       paintPublicCounts();
@@ -404,7 +416,7 @@ function enterRoom(code: string, created: boolean, isPublic = false): void {
     // `claimHost` ONLY for the peer that minted the code. A typed code or a
     // link joins as a guest and waits to hear from the incumbent — otherwise
     // two peers race to host the same room.
-    { appId: 'morsel', roomId: code, claimHost: created },
+    { appId: APP_ID, roomId: code, claimHost: created },
     {
       onHostChange: (_id, isSelfHost) => {
         session?.setHost(isSelfHost);
@@ -1003,16 +1015,37 @@ window.addEventListener('beforeunload', () => {
 
 // ── boot ────────────────────────────────────────────────────────────────────
 
-// A ?room= link is honoured ONCE, then cleared. Leave it in the URL and a reload
-// — or reopening from a home-screen icon — silently drags the player back into a
-// room they left, with no way to start a new one.
-const url = new URL(location.href);
-const deep = url.searchParams.get('room');
-if (deep && !deepLinkUsed) {
-  deepLinkUsed = true;
-  const code = normalizeRoomCode(deep);
-  if (code.length >= 3) enterRoom(code, false);
-  else showMenu();
-} else {
-  showMenu();
+/**
+ * TURN credentials are fetched ONCE, here, before any screen exists — and that
+ * ordering is load-bearing, not tidiness.
+ *
+ * Trystero builds a single global connection pool from the config of the FIRST
+ * joinRoom() on the page. Whichever mesh opens first wins, permanently: a
+ * setTurnConfig() that lands afterwards is silently ignored and leaves the
+ * initiating half of every peer pair STUN-only, which is exactly the pair that
+ * fails on carrier-grade NAT. This page opens two kinds of mesh — the game room
+ * and the public noticeboard — and the menu can reach the board before anyone
+ * enters a room, so the only safe place for this call is ahead of both.
+ *
+ * getTurnConfig() is session-cached, times out in 3s and fails open to [] (plain
+ * STUN, the old behaviour), so it can slow a boot but can never block one.
+ */
+async function boot(): Promise<void> {
+  setTurnConfig(await getTurnConfig());
+
+  // A ?room= link is honoured ONCE, then cleared. Leave it in the URL and a
+  // reload — or reopening from a home-screen icon — silently drags the player
+  // back into a room they left, with no way to start a new one.
+  const url = new URL(location.href);
+  const deep = url.searchParams.get('room');
+  if (deep && !deepLinkUsed) {
+    deepLinkUsed = true;
+    const code = normalizeRoomCode(deep);
+    if (code.length >= 3) enterRoom(code, false);
+    else showMenu();
+  } else {
+    showMenu();
+  }
 }
+
+void boot();

@@ -18,7 +18,7 @@
  * Everything else is bookkeeping around that.
  */
 
-import { makeRng, randFloat, type Rng } from './engine/rng';
+import { makeRng, randFloat, type Rng } from '@ben-gy/game-engine/rng';
 import type { Mode } from './modes';
 import { TUNING as T } from './tuning';
 
