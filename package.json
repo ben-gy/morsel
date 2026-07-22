@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "description": "Everything smaller than you is lunch — but the only way to catch it is to spit out the mass you were winning with.",
+  "license": "AGPL-3.0-or-later",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
