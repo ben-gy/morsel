@@ -13,11 +13,6 @@
  * games in this factory shipped broken by leaving and re-joining to "reset".
  */
 
-// feedback:begin (managed by hub/scripts/feedback/backfill.mjs)
-import { mountFeedback } from './feedback';
-mountFeedback();
-// feedback:end
-
 import './styles/mobile.css';
 import './styles/main.css';
 
